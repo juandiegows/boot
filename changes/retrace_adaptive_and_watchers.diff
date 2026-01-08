@@ -1,0 +1,245 @@
+# Diff hunks para portar: retrace adaptativo, touchWatcher, bypass Hold y pre-send
+# Ruta objetivo típica: bot/replica_bot.js
+# Aplica manualmente o conviértelo a un patch git; estas son las secciones a reemplazar/insertar.
+
+*** resolveAbsDelta (reemplaza la función existente) ***
+function resolveAbsDelta(cfg, ticker) {
+  try {
+    if (cfg?.retrace50?.useAdaptiveTargets && global.__adaptiveTargets) {
+      const k = String(ticker);
+      const at = global.__adaptiveTargets[k];
+      if (at && typeof at.targetAbs === 'number') return at.targetAbs;
+    }
+  } catch {}
+  try {
+    const base = String(ticker || '').toUpperCase().replace(/-OTC$/i, '');
+    const isOtc = /-OTC$/i.test(String(ticker || ''));
+    const otcMap = cfg?.retrace50?.targetAbsByTickerOtc;
+    const spotMap = cfg?.retrace50?.targetAbsByTickerSpot || cfg?.retrace50?.targetAbsByTickerNormal;
+    const legacyMap = cfg?.retrace50?.targetAbsByTicker;
+
+    // 1) Preferir mapa específico según mercado
+    if (isOtc) {
+      if (otcMap && typeof otcMap === 'object') {
+        const v = otcMap[base];
+        if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+      }
+    } else {
+      if (spotMap && typeof spotMap === 'object') {
+        const v = spotMap[base];
+        if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+      }
+      // 2) Fallback: si Spot no tiene valor usable para este par, usar OTC
+      if (otcMap && typeof otcMap === 'object') {
+        const v3 = otcMap[base];
+        if (typeof v3 === 'number' && isFinite(v3) && v3 > 0) return v3;
+      }
+    }
+    // 3) Fallback al mapa legado (único)
+    if (legacyMap && typeof legacyMap === 'object') {
+      const v2 = legacyMap[base];
+      if (typeof v2 === 'number' && isFinite(v2) && v2 > 0) return v2;
+    }
+  } catch {}
+  // 3) Fallback al valor absoluto global
+  try {
+    const base = String(ticker || '').toUpperCase().replace(/-OTC$/i, '');
+    const fallback = Number(cfg?.retrace50?.targetAbs || 0);
+    const mult = Number(cfg?.retrace50?.nonEurJpyMultiplier ?? cfg?.retrace50?.aggressiveNonEurJpyMultiplier ?? 1.5);
+    if (base && base !== 'EURJPY' && isFinite(mult) && mult > 0) {
+      const out = fallback * mult;
+      if (cfg.debugSignals) console.log(`[${ticker}] resolveAbsDelta: non-EURJPY multiplier applied x${mult} -> ${out}`);
+      return out;
+    }
+    return fallback;
+  } catch (e) {
+    return Number(cfg?.retrace50?.targetAbs);
+  }
+}
+
+*** getTolerancePct (reemplaza la función existente) ***
+function getTolerancePct(cfg, ticker) {
+  // Relajar tolerancia por defecto para generar más operaciones
+  const defTol = Number(cfg?.retrace50?.tolerancePct ?? 0.00015);
+  try {
+    if (cfg?.retrace50?.useAdaptiveTargets && global.__adaptiveTargets) {
+      const at = global.__adaptiveTargets[String(ticker)];
+      if (at && typeof at.tolerancePct === 'number') return at.tolerancePct;
+    }
+    const isOtc = /-OTC$/i.test(String(ticker || ''));
+    const tolSpot = cfg?.retrace50?.tolerancePctSpot;
+    const tolOtc = cfg?.retrace50?.tolerancePctOtc;
+    if (isOtc) {
+      if (typeof tolOtc === 'number' && isFinite(tolOtc) && tolOtc >= 0) return tolOtc;
+      return defTol;
+    }
+    if (typeof tolSpot === 'number' && isFinite(tolSpot) && tolSpot >= 0) return tolSpot;
+    // Fallback: si no hay tolerancia Spot, permitir usar OTC como base si existe
+    if (typeof tolOtc === 'number' && isFinite(tolOtc) && tolOtc >= 0) return tolOtc;
+  } catch {}
+  try {
+    const base = String(ticker || '').toUpperCase().replace(/-OTC$/i, '');
+    const mult = Number(cfg?.retrace50?.nonEurJpyMultiplier ?? cfg?.retrace50?.aggressiveNonEurJpyMultiplier ?? 1.5);
+    if (base && base !== 'EURJPY' && isFinite(mult) && mult > 0) {
+      const out = defTol * mult;
+      if (cfg.debugSignals) console.log(`[${ticker}] getTolerancePct: non-EURJPY tolerance multiplier applied x${mult} -> ${out}`);
+      return out;
+    }
+    return defTol;
+  } catch (e) {
+    return defTol;
+  }
+}
+
+*** recordSignalSlot: bloque ADAPTIVE (insertar/actualizar) ***
+# Inserta este bloque dentro de la función recordSignalSlot, antes de crear el slot retrace50.
+# Actualiza global.__adaptiveTargets y global.__adaptiveRanges con cálculos basados en rangos.
+try {
+  if (cfg?.retrace50?.useAdaptiveTargets && tf === '1m') {
+    if (!global.__adaptiveTargets) global.__adaptiveTargets = {};
+    if (!global.__adaptiveRanges) global.__adaptiveRanges = {};
+    const k = String(ticker);
+    const win = Number(cfg.retrace50.adaptive?.window || 60);
+    const minWin = Number(cfg.retrace50.adaptive?.minWindow || 20);
+    const percRange = Number(cfg.retrace50.adaptive?.percentileRange || 0.65);
+    const alpha = Number(cfg.retrace50.adaptive?.alpha || 0.25);
+    const coeff = Number(cfg.retrace50.adaptive?.targetCoeff || 0.5);
+    const minAbs = Number(cfg.retrace50.adaptive?.minTargetAbs || 0.0002);
+    const maxAbs = Number(cfg.retrace50.adaptive?.maxTargetAbs || 0.0005);
+    const tolFactor = Number(cfg.retrace50.adaptive?.tolFactor || 0.30);
+    const tolMin = Number(cfg.retrace50.adaptive?.tolMin || 0.00005);
+    const tolMax = Number(cfg.retrace50.adaptive?.tolMax || 0.00012);
+    const microWin = Number(cfg.retrace50.adaptive?.microWindow || 10);
+    const microPerc = Number(cfg.retrace50.adaptive?.microPercentile || 0.40);
+    const shockFactor = Number(cfg.retrace50.adaptive?.shockFactor || 2.5);
+    const freezeMs = Number(cfg.retrace50.adaptive?.freezeMs || 60000);
+    const arr = global.__adaptiveRanges[k] || (global.__adaptiveRanges[k] = []);
+    // push range of just closed candle(s)
+    if (closed && closed.length) {
+      const last = closed[closed.length - 1];
+      if (!last.current && isFinite(last.high) && isFinite(last.low)) {
+        const range = Math.max(0, Number(last.high) - Number(last.low));
+        if (range > 0) arr.push(range);
+        if (arr.length > win*2) arr.splice(0, arr.length - win*2);
+      }
+    }
+    if (arr.length >= minWin) {
+      const sorted = [...arr].sort((a,b)=>a-b);
+      const pick = sorted[Math.min(sorted.length-1, Math.max(0, Math.round((sorted.length-1)*percRange)))];
+      const baseRange = pick || sorted[sorted.length-1];
+      const prev = global.__adaptiveTargets[k];
+      const latestRange = arr[arr.length-1];
+      const frozen = prev && prev.frozenUntil && prev.frozenUntil > Date.now();
+      let targetAbsDyn = Math.min(maxAbs, Math.max(minAbs, baseRange * coeff));
+      let tolerancePctDyn;
+      const recent = arr.slice(-microWin).sort((a,b)=>a-b);
+      const microPick = recent[Math.min(recent.length-1, Math.max(0, Math.round((recent.length-1)*microPerc)))];
+      if (microPick && isFinite(microPick)) {
+        const lastClose = closed?.[closed.length-1]?.close || 1;
+        const microPct = (lastClose>0)? (microPick / lastClose): microPick;
+        tolerancePctDyn = Math.min(tolMax, Math.max(tolMin, microPct * tolFactor));
+      } else tolerancePctDyn = tolMin;
+      if (!frozen && latestRange > baseRange * shockFactor) {
+        targetAbsDyn = prev?.targetAbs || targetAbsDyn;
+        const until = Date.now() + freezeMs;
+        global.__adaptiveTargets[k] = { ...(prev||{}), targetAbs: targetAbsDyn, tolerancePct: tolerancePctDyn, frozenUntil: until, updatedAt: Date.now() };
+        if (cfg.debugSignals) console.log(`[ADAPT] ${ticker} shock freeze baseRange=${baseRange.toFixed(6)} latest=${latestRange.toFixed(6)} targetAbs=${targetAbsDyn.toFixed(6)} tolPct=${tolerancePctDyn.toExponential(3)}`);
+      } else {
+        const newTarget = prev ? (prev.targetAbs + alpha * (targetAbsDyn - prev.targetAbs)) : targetAbsDyn;
+        const newTol = prev ? (prev.tolerancePct + alpha * (tolerancePctDyn - prev.tolerancePct)) : tolerancePctDyn;
+        global.__adaptiveTargets[k] = { targetAbs: newTarget, tolerancePct: newTol, updatedAt: Date.now(), frozenUntil: (prev?.frozenUntil || 0) };
+        if (cfg.debugSignals) console.log(`[ADAPT] ${ticker} targetAbs=${newTarget.toFixed(6)} tolPct=${newTol.toExponential(3)} baseRange=${baseRange.toFixed(6)} latestRange=${latestRange.toFixed(6)}`);
+      }
+    }
+  }
+} catch {}
+
+*** touchWatcher.scheduleRetraceTouch callbacks (onDetected/onResult) ***
+# Inserta o actualiza los callbacks de touchWatcher.scheduleRetraceTouch para que:
+# - registren `w.touchedAtMs`, `w.touchedPx`, `w.touchedSrc`
+# - respeten `cfg.retrace50.enableRetry` antes de establecer `executeImmediately`
+
+onDetected: (info) => {
+  try {
+    const detectedPx = Number(info.price);
+    const dir = String(slot.lockedDirection || slot.signal).toUpperCase();
+    const w = slot.waitRetrace50 || {};
+    const target = (w && typeof w.entryTarget === 'number') ? Number(w.entryTarget) : Number(w.midPrev);
+    const passPct = Math.max(0, Number(cfg?.retrace50?.passTargetMarginPct ?? 0));
+    const passAbs = Math.max(0, Number(cfg?.retrace50?.passTargetMarginAbs ?? 0));
+    const fallback = Math.max(0, Number(cfg?.retrace50?.execAllowedSlipAbs ?? 0));
+    const margin = Math.abs(target) * passPct + (passAbs || fallback);
+    let passed = true;
+    if (isFinite(target)) {
+      if (dir === 'CALL') passed = detectedPx < (target - margin);
+      else passed = detectedPx > (target + margin);
+    }
+    if (passed) {
+      w.touchedAtMs = info.ts;
+      w.touchedPx = detectedPx;
+      w.touchedSrc = 'tick';
+      slot.waitRetrace50 = w;
+      pendingByKey.set(kTurbo, slot);
+      if (cfg.debugSignals) console.log(`[${ticker}] ${tf} TOUCH_DETECTED px=${detectedPx.toFixed(6)} side=${info.side} PASSED`);
+    } else {
+      if (cfg.debugSignals) console.log(`[${ticker}] ${tf} TOUCH_IGNORED px=${detectedPx.toFixed(6)} NOT_PASSED target=${isFinite(target)?target.toFixed(6):'-'} margin=${margin}`);
+    }
+  } catch (e) {}
+},
+onResult: (res) => {
+  try {
+    const retriesEnabled_local = !!(cfg && cfg.retrace50 && cfg.retrace50.enableRetry);
+    if (res && res.ok) {
+      if (retriesEnabled_local) {
+        if (cfg?.retrace50?.enableRetry) {
+          slot.executeImmediately = true;
+        } else {
+          if (cfg.debugSignals) console.log(`${slot.tf} slot.executeImmediately suppressed (retries disabled)`);
+        }
+        if (cfg.debugSignals) console.log(`[${ticker}] ${tf} ORDER_SENT by touchWatcher info=${JSON.stringify(res.info)}`);
+      } else if (cfg.debugSignals) {
+        console.log(`[${ticker}] ${tf} ORDER_SENT by touchWatcher but retries disabled -> executeImmediately suppressed`);
+      }
+    } else {
+      if (cfg.debugSignals) console.log(`[${ticker}] ${tf} ORDER_FAILED by touchWatcher err=${res && res.error}`);
+    }
+    try { delete slot.waitRetrace50._touchHandle; } catch (e) {}
+    pendingByKey.set(kTurbo, slot);
+  } catch (e) {}
+}
+
+*** HOLD bypass when price passed target (insert inside hold flow) ***
+# Dentro del bloque que maneja HOLD (cuando holdMs>0), añade este fragmento:
+try {
+  const disableHoldOnPass = !!(cfg && cfg.retrace50 && cfg.retrace50.disableHoldOnPassZone);
+  if (disableHoldOnPass) {
+    const target = (w && typeof w.entryTarget === 'number' && isFinite(w.entryTarget)) ? Number(w.entryTarget) : Number(w.midPrev);
+    const passPct = Math.max(0, Number(cfg?.retrace50?.passTargetMarginPct ?? 0));
+    const passAbs = Math.max(0, Number(cfg?.retrace50?.passTargetMarginAbs ?? 0));
+    const passMargin = Math.abs(target) * passPct + passAbs;
+    let passed = true;
+    if (isFinite(target)) {
+      if (dir === 'CALL') passed = Number(curPrice) < (target - passMargin);
+      else passed = Number(curPrice) > (target + passMargin);
+    }
+    if (passed) {
+      const hMs = Math.max(0, Number(cfg?.retrace50?.holdMs ?? 0));
+      w.holdStartMs = Date.now() - hMs - 1;
+      if (cfg.debugSignals) console.log(`[${ticker}] ${tf} retrace50 bypass hold (price passed target) px=${Number(curPrice).toFixed(6)} target=${target.toFixed(6)} passMargin=${passMargin}`);
+      pend.waitRetrace50 = w;
+      pendingByKey.set(k, pend);
+    }
+  }
+} catch (e) {}
+
+*** pre-send price gate: permitir envío si existió TOUCH (insert/replace) ***
+# En la comprobación final antes de placeOrder, donde se calcula `ok`:
+try {
+  const hadTouch = !!(pend.waitRetrace50 && pend.waitRetrace50.touchedAtMs);
+  if (!ok && hadTouch) {
+    if (cfg.debugSignals) console.log(`[${ticker}] ${tf} pre-send bypass por TOUCH previo: px=${px.toFixed(6)} target=${target.toFixed(6)} touchedPx=${(pend.waitRetrace50 && pend.waitRetrace50.touchedPx)?pend.waitRetrace50.touchedPx.toFixed(6):'-'}`);
+    ok = true;
+  }
+} catch (e) {}
+
+# Fin del diff. Si quieres, puedo convertir estas secciones en un parche git válido o aplicarlas automáticamente en este repositorio.

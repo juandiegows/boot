@@ -1,0 +1,30 @@
+# --- Dependencias y Entornos ---
+node_modules/
+.venv/
+venv/
+env/
+dist/
+electron-dist/
+build/
+
+# --- Archivos de Configuración Sensibles ---
+# (Basado en tu archivo .env y configs)
+.env
+configs/
+
+# --- Logs y Temporales ---
+logs/
+*.log
+backend.stderr.log
+backend.stdout.log
+var/
+
+# --- Archivos del Sistema y Editores ---
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# --- Ejecutables que ya están en la carpeta ---
+# (Suelen ser pesados o autogenerados)
+node.exe

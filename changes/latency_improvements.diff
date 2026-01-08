@@ -1,0 +1,54 @@
+*** Begin Patch
+*** Update File: resources/app.asar.unpacked/dist-server/bot/replica_bot.js
+@@
+-const CANDLES_CACHE_LIMIT = 500;
++const CANDLES_CACHE_LIMIT = 2000;
+@@
+-async function getCandlesCached(sdk, activeId, size, opts = {}, ttlMs = 300) {
++async function getCandlesCached(sdk, activeId, size, opts = {}, ttlMs = 800) {
+@@
+-          const f = await callWithTimeout(() => sdk.candles(), 2000).catch(() => null);
++          const f = await callWithTimeout(() => sdk.candles(), 1200).catch(() => null);
+@@
+-          data = await callWithTimeout(() => candlesFacade.getCandles(Number(activeId), Number(size), opts), 1500).catch(() => []);
++          data = await callWithTimeout(() => candlesFacade.getCandles(Number(activeId), Number(size), opts), 1200).catch(() => []);
+@@
+-          data = await callWithTimeout(() => sdk.getCandles(Number(activeId), Number(size), opts), 1500).catch(() => []);
++          data = await callWithTimeout(() => sdk.getCandles(Number(activeId), Number(size), opts), 1200).catch(() => []);
+*** End Patch
+
+*** Begin Patch
+*** Update File: resources/app.asar.unpacked/dist-server/bot/replica_bot.js
+@@
+-const SDK_TIMEOUT_FLOOR_MS = Math.max(0, Number(process?.env?.SDK_TIMEOUT_FLOOR_MS ?? 3000));
++const SDK_TIMEOUT_FLOOR_MS = Math.max(0, Number(process?.env?.SDK_TIMEOUT_FLOOR_MS ?? 1200));
+@@
+-    try {
+-        const k2 = String(err?.message || 'sdk-call-timeout');
+-        __cooldownUntil.set(k2, Date.now() + DEFAULT_COOLDOWN_MS);
+-      } catch {}
++    try {
++        const k2 = String(err?.message || 'sdk-call-timeout');
++        const prev = __cooldownUntil.get(k2) || 0;
++        const now = Date.now();
++        const extra = Math.min(30e3, (now - prev) < 0 ? DEFAULT_COOLDOWN_MS : DEFAULT_COOLDOWN_MS * 2);
++        __cooldownUntil.set(k2, now + extra);
++      } catch {}
+*** End Patch
+
+*** Begin Patch
+*** Update File: resources/app.asar.unpacked/dist-server/bot/replica_bot.js
+@@
+-    for (const p of pairsGlobal || []) {
+-      try { ensureQuoteSubscription(sdkClient, p.id).catch(() => {}); } catch {}
+-    }
++    const staggerMs = Math.max(25, Number(process?.env?.QUOTE_RESUB_STAGGER_MS ?? 60));
++    let idx = 0;
++    for (const p of pairsGlobal || []) {
++      try {
++        const delay = idx * staggerMs;
++        setTimeout(() => { try { ensureQuoteSubscription(sdkClient, p.id).catch(()=>{}); } catch {} }, delay);
++      } catch {}
++      idx++;
++    }
+*** End Patch

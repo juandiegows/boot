@@ -1,0 +1,14 @@
+{
+  "name": "ESPOSOTRADERBOT",
+  "short_name": "TraderBot",
+  "description": "Panel de control de ESPOSOTRADERBOT",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1218",
+  "theme_color": "#0b1218",
+  "icons": [
+    { "src": "/logo-64x64.png", "sizes": "64x64", "type": "image/png" },
+    { "src": "/logo-192x192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/logo-512x512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

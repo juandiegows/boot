@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="es" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <title>ESPOSOTRADERBOT</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#0b1218" />
+    <meta name="description" content="Panel de control de ESPOSOTRADERBOT" />
+  <link rel="icon" type="image/png" sizes="64x64" href="./logo-64x64.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="./logo-192x192.png" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+    <script>
+      (function(){
+        try{
+          window.APP_CONFIG = window.APP_CONFIG || {};
+          if(!window.APP_CONFIG.DASH_URL){
+            const params = new URLSearchParams(location.search);
+            const dash = params.get('_DASH_URL') || (location.origin && location.origin!=='null' ? location.origin : 'http://127.0.0.1:3000');
+            window.APP_CONFIG.DASH_URL = dash;
+            // small hint for troubleshooting in portable runs
+            console.log('APP_CONFIG.DASH_URL fallback ->', window.APP_CONFIG.DASH_URL);
+          }
+        }catch(e){console.warn('APP_CONFIG fallback error', e)}
+      })();
+    </script>
+  <script>
+      // Small in-page helper to keep botId in memory and ensure safe shutdown on window close.
+      (function(){
+        try{
+          window.__BOT_CTX = { botId: null, broker: null, email: null };
+          // Nueva estructura en memoria para sesión (solo RAM, no localStorage/sessionStorage)
+          window.__SESSION_CTX = { sessionId: null, createdAt: null };
+          // Modal de confirmación amigable
+          window.__showStartConfirm = function(cfg){
+            return new Promise(resolve=>{
+              try{
+                const broker = (cfg && cfg.broker) || (window.__BOT_CTX && window.__BOT_CTX.broker) || '—';
+                const email = (cfg && cfg.email) || (window.__BOT_CTX && window.__BOT_CTX.email) || '—';
+                const balanceType = (cfg && cfg.balanceType) || 'DEMO';
+                const c = (cfg && cfg.config) || {};
+                const amount = c.amount ?? '—';
+                const enabledTickers = Array.isArray(c.enabledTickers) ? c.enabledTickers.join(', ') : '—';
+                const useOtc = c.useOtc ? 'Sí' : 'No';
+                const m1 = c.oneMinuteSignals ? 'Sí' : 'No';
+                const m5 = c.fiveMinuteSignals ? 'Sí' : 'No';
+                const exp1m = c.expirySecPerTimeframe && c.expirySecPerTimeframe['1m'] != null ? c.expirySecPerTimeframe['1m'] + 's' : '—';
+                const exp5m = c.expirySecPerTimeframe && c.expirySecPerTimeframe['5m'] != null ? c.expirySecPerTimeframe['5m'] + 's' : '—';
+                const takeProfit = (c.takeProfit ?? '—');
+                const stopLoss = (c.stopLoss ?? '—');
+                const turboOnly = c.useOnlyTurboBinary ? 'Sí' : 'No';
+
+                const backdrop = document.createElement('div');
+                backdrop.className = 'csm-backdrop';
+                const dialog = document.createElement('div');
+                dialog.className = 'csm-dialog';
+                backdrop.appendChild(dialog);
+
+                const header = document.createElement('div');
+                header.className = 'csm-header';
+                header.innerHTML = '<span>Confirmar inicio del bot</span>';
+                const x = document.createElement('button');
+                x.className = 'csm-close';
+                x.setAttribute('aria-label','Cerrar');
+                x.textContent = '×';
+                header.appendChild(x);
+                dialog.appendChild(header);
+
+                const body = document.createElement('div');
+                body.className = 'csm-body';
+                const ul = document.createElement('ul');
+                ul.className = 'csm-list';
+                const add = (k,v)=>{
+                  const li=document.createElement('li'); li.className='csm-item';
+                  const dk=document.createElement('div'); dk.className='csm-key'; dk.textContent=k;
+                  const dv=document.createElement('div'); dv.className='csm-val'; dv.textContent=String(v);
+                  li.appendChild(dk); li.appendChild(dv); ul.appendChild(li);
+                };
+                add('Broker', broker);
+                add('Email', email);
+                add('Balance', balanceType);
+                add('Monto', amount);
+                add('Tickers', enabledTickers);
+                add('Usar OTC', useOtc);
+                add('Señales M1', m1);
+                add('Señales M5', m5);
+                add('Expiración 1m', exp1m);
+                add('Expiración 5m', exp5m);
+                add('Take Profit', takeProfit);
+                add('Stop Loss', stopLoss);
+                add('Solo Turbo/Binary', turboOnly);
+                body.appendChild(ul);
+                const note=document.createElement('div'); note.className='csm-note'; note.textContent='Revisa cuidadosamente antes de iniciar. Podrás cambiarlo en Config.';
+                body.appendChild(note);
+                dialog.appendChild(body);
+
+                const actions = document.createElement('div');
+                actions.className = 'csm-actions';
+                const cancel = document.createElement('button');
+                cancel.className = 'csm-btn';
+                cancel.textContent = 'Cancelar';
+                const ok = document.createElement('button');
+                ok.className = 'csm-btn csm-btn-primary';
+                ok.textContent = 'Iniciar';
+                actions.appendChild(cancel); actions.appendChild(ok);
+                dialog.appendChild(actions);
+
+                const cleanup = (val)=>{ try{ document.body.removeChild(backdrop); }catch{} resolve(val); };
+                cancel.addEventListener('click',()=>cleanup(false));
+                ok.addEventListener('click',()=>cleanup(true));
+                x.addEventListener('click',()=>cleanup(false));
+                backdrop.addEventListener('click',(e)=>{ if(e.target===backdrop) cleanup(false); });
+                document.addEventListener('keydown', function onKey(ev){ if(ev.key==='Escape'){ document.removeEventListener('keydown',onKey); cleanup(false);} });
+                document.body.appendChild(backdrop);
+              }catch{ resolve(true); }
+            });
+          };
+          // Wrap fetch to capture /api/bot/start response and store botId temporarily in memory
+          const _origFetch = window.fetch.bind(window);
+          window.fetch = async function(input, init){
+            try{
+              const url = (typeof input === 'string') ? input : (input && input.url) || '';
+              // Interceptar respuesta de /api/auth/verify para extraer sessionId y borrar credenciales del request body
+              const isAuthVerify = /\/api\/auth\/verify/.test(String(url));
+
+              // Si es llamada a start y tenemos sessionId, sustituimos credenciales por sessionId
+              if (init && typeof init === 'object' && /\/api\/bot\/start/.test(String(url)) && typeof init.body === 'string'){
+                try {
+                  const original = JSON.parse(init.body);
+                  // Confirmación con modal personalizado
+                  try{
+                    const ok = await window.__showStartConfirm(original);
+                    if(!ok){
+                      return new Response(JSON.stringify({ ok:false, error:'Start cancelled by user' }), { status: 499, headers: { 'Content-Type': 'application/json' } });
+                    }
+                  }catch(_){}
+                  if (!original.sessionId && window.__SESSION_CTX.sessionId){
+                    const nextBody = { sessionId: window.__SESSION_CTX.sessionId };
+                    // Preservar balanceType seleccionado por el usuario si existe
+                    if (original.balanceType) nextBody.balanceType = original.balanceType;
+                    // Mantener configuración si existiera
+                    if (original.config) nextBody.config = original.config;
+                    // Forzar solo Turbo/Binary desde el frontend
+                    try{
+                      nextBody.config = nextBody.config || {};
+                      nextBody.config.useOnlyTurboBinary = true;
+                    }catch(_){}
+                    if (original.options) nextBody.options = original.options;
+                    // Fallback explícito a DEMO si no se indicó ninguno (no forzar si venía REAL)
+                    if (!nextBody.balanceType) nextBody.balanceType = 'DEMO';
+                    init.body = JSON.stringify(nextBody);
+                    init.headers = Object.assign({ 'Content-Type': 'application/json' }, init.headers||{});
+                    try { console.log('[FRONTEND] start override balanceType=', nextBody.balanceType); } catch(_){}
+                  }
+                }catch(e){ /* noop */ }
+              }
+              // Permitir que el frontend envíe la configuración tal como la eligió el usuario (incluido useOtc)
+              const res = await _origFetch(input, init);
+              // Capturar sessionId tras verificación de auth
+              if (isAuthVerify && res && res.ok){
+                try{
+                  const clone = res.clone();
+                  clone.json().then(j => {
+                    if (j && j.ok && j.sessionId){
+                      window.__SESSION_CTX.sessionId = j.sessionId;
+                      window.__SESSION_CTX.createdAt = Date.now();
+                      console.log('[FRONTEND] sessionId almacenado en memoria');
+                    }
+                  }).catch(()=>{});
+                }catch(e){ /* ignore */ }
+              }
+              // If this is a start call, try to read botId and save in memory
+              try{
+                if (url && url.indexOf('/api/bot/start') !== -1 && res && res.ok){
+                  const clone = res.clone();
+                  clone.json().then(j=>{ if(j && j.ok && j.botId){ window.__BOT_CTX.botId = j.botId; if(init && init.body){ try{ const b = JSON.parse(init.body); window.__BOT_CTX.broker = b.broker; window.__BOT_CTX.email = b.email; }catch{} } console.log('[FRONTEND] botId stored', j.botId); } }).catch(()=>{});
+                }
+              }catch(e){}
+              return res;
+            }catch(e){ throw e; }
+          };
+          // Toaster ligero
+          (function(){
+            try{
+              const wrap = document.createElement('div');
+              wrap.className = 'ct-wrap';
+              document.body.appendChild(wrap);
+              window.__toast = function(msg, type='ok', timeout=3500){
+                try{
+                  const t = document.createElement('div'); t.className = `ct ${type}`;
+                  const span = document.createElement('div'); span.textContent = String(msg);
+                  const x = document.createElement('button'); x.className='ct-close'; x.textContent='×';
+                  t.appendChild(span); t.appendChild(x); wrap.appendChild(t);
+                  const close=()=>{ try{ t.style.animation='ct-out .12s ease-in forwards'; setTimeout(()=>wrap.removeChild(t),130);}catch{} };
+                  x.addEventListener('click', close);
+                  if(timeout>0) setTimeout(close, timeout);
+                }catch{}
+              }
+            }catch{}
+          })();
+          // Manejar errores no controlados para evitar banner persistente (fase de captura y bloqueo total)
+          const __urh = (ev)=>{
+            try{
+              const msg = (ev && ev.reason && (ev.reason.error || ev.reason.message || ev.reason)) || 'Error inesperado';
+              // Silenciar casos esperados (cancelado por el usuario)
+              if(String(msg).toLowerCase().includes('cancelled by user')){
+                ev.preventDefault?.(); ev.stopImmediatePropagation?.();
+                window.__toast('Inicio cancelado por el usuario', 'warn', 2500);
+                return false;
+              }
+              // Para el resto, mostrar toast y prevenir la burbuja visual
+              window.__toast(msg, 'err', 4000);
+              ev.preventDefault?.(); ev.stopImmediatePropagation?.();
+              return false;
+            }catch{}
+          };
+          window.addEventListener('unhandledrejection', __urh, { capture:true });
+          window.onunhandledrejection = __urh;
+
+          // Atenuar console.error solo para el texto específico, por si la UI externa lo usa para pintar el banner
+          try{
+            const __origErr = console.error.bind(console);
+            console.error = function(...args){
+              try{
+                const s = args.map(a=>typeof a==='string'?a: (a&&a.stack)||JSON.stringify(a)).join(' ').toLowerCase();
+                if(s.includes('unhandled rejection') && s.includes('cancelled by user')) return;
+              }catch{}
+              return __origErr(...args);
+            }
+          }catch{}
+          // Limpieza defensiva de banners visibles con texto de unhandled rejection (por si el runtime ya los imprimió)
+          try{
+            const scrub = ()=>{
+              const candidates = Array.from(document.querySelectorAll('div,pre,section'));
+              candidates.forEach(el=>{
+                const t=(el.textContent||'').toLowerCase();
+                if(t.includes('unhandled rejection') || t.includes('unhandledrejection')){
+                  // Ocultar la caja para no tapar la UI
+                  el.style.display='none';
+                }
+              });
+            };
+            scrub();
+            const mo3 = new MutationObserver(()=>scrub());
+            mo3.observe(document.documentElement,{subtree:true,childList:true});
+          }catch{}
+          // Ocultar visualmente el control "Solo Turbo/Binary" y campos "Expiry" en Config
+          try{
+            const hideTurbo = ()=>{
+              try{
+                // Busca un label o texto que contenga exactamente 'Solo Turbo/Binary'
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+                let node; const matches=[];
+                while((node=walker.nextNode())){
+                  const text = (node.textContent||'').trim();
+                  if(text === 'Solo Turbo/Binary'){
+                    matches.push(node);
+                  }
+                }
+                matches.forEach(el=>{
+                  // Oculta el contenedor del toggle (dos niveles hacia arriba suele ser el wrapper del control)
+                  const wrap = el.closest && (el.closest('.toggle') || el.closest('label') || el.parentElement);
+                  (wrap||el).style.display = 'none';
+                });
+              }catch{}
+            };
+            const hideExpiry = ()=>{
+              try{
+                const labels = Array.from(document.querySelectorAll('label'));
+                const isExpiryLabel = (el)=>{
+                  const txt=(el.textContent||'').trim();
+                  return /^(\s*)?(expiry\s*1m|expiry\s*5m|expiraci[oó]n\s*1m|expiraci[oó]n\s*5m)/i.test(txt);
+                };
+                labels.filter(isExpiryLabel).forEach(label=>{
+                  let wrap = label.parentElement;
+                  // Oculta solo el bloque del campo (label + input)
+                  if(wrap && wrap.querySelector && wrap.querySelector('input')){
+                    wrap.style.display='none';
+                  }else{
+                    label.style.display='none';
+                  }
+                });
+              }catch{}
+            };
+            hideTurbo();
+            hideExpiry();
+            const mo = new MutationObserver(()=>hideTurbo());
+            const mo2 = new MutationObserver(()=>hideExpiry());
+            mo.observe(document.documentElement,{subtree:true,childList:true});
+            mo2.observe(document.documentElement,{subtree:true,childList:true});
+          }catch{}
+          // On unload attempt to stop bot and ask backend to exit to free ports
+          async function tryStop(){
+            const botId = window.__BOT_CTX && window.__BOT_CTX.botId;
+            const payloadStop = botId ? JSON.stringify({ botId }) : null;
+            // Use sendBeacon when available for reliability during unload
+            try{
+              if (navigator.sendBeacon){
+                if (payloadStop) navigator.sendBeacon('/api/bot/stop', payloadStop);
+                // small delay for beacon to flush
+                navigator.sendBeacon('/api/exit', JSON.stringify({ reason: 'window-unload' }));
+                return;
+              }
+            }catch(e){ }
+            // Fallback to fetch keepalive
+            try{
+              if (payloadStop) await fetch('/api/bot/stop', { method: 'POST', headers: {'Content-Type':'application/json'}, body: payloadStop, keepalive: true });
+              await fetch('/api/exit', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ reason: 'window-unload' }), keepalive: true });
+            }catch(e){ /* ignore */ }
+          }
+          window.addEventListener('beforeunload', function(e){
+            // call sync stop - best effort; do not block UI too long
+            tryStop();
+          });
+        }catch(e){console.warn('bot ctx init failed', e)}
+      })();
+  </script>
+  <script type="module" crossorigin src="./assets/index-C5a_Dnou.js"></script>
+  <!-- Eliminado: ocultamiento del control "Usar OTC". Ahora el usuario puede alternarlo libremente. -->
+    <link rel="stylesheet" crossorigin href="./assets/index-BeAAKFT5.css">
+    <!-- Override: usar el logo como fondo de la página (no invasivo, reversible) -->
+    <style>
+      /* Usar la imagen en assets (copiada previamente). Cambia ruta/tamaño según prefieras. */
+      body {
+        background-image: url('./assets/bg-dashboard.png');
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: contain; /* mantiene proporción y se escala */
+        background-color: #0b1218; /* fondo oscuro por defecto */
+      }
+      /* Modal de confirmación (csm-*) */
+      .csm-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:999999}
+      .csm-dialog{width:min(640px,92vw);max-height:80vh;background:#0f172a;border:1px solid #334155;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.5);color:#e2e8f0;display:flex;flex-direction:column;overflow:hidden}
+      .csm-header{padding:12px 16px;border-bottom:1px solid #334155;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+      .csm-close{background:transparent;border:0;color:#94a3b8;cursor:pointer;font-size:18px;line-height:1;padding:4px}
+      .csm-body{padding:12px 16px;overflow:auto}
+      .csm-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr;gap:6px}
+      .csm-item{display:flex;gap:8px}
+      .csm-key{width:160px;color:#94a3b8}
+      .csm-val{flex:1;color:#e2e8f0;word-break:break-word}
+      .csm-actions{padding:12px 16px;border-top:1px solid #334155;display:flex;gap:8px;justify-content:flex-end}
+      .csm-btn{padding:8px 14px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;cursor:pointer}
+      .csm-btn:hover{background:#0b1324}
+      .csm-btn-primary{background:linear-gradient(90deg,#f59e0b,#fcd34d);border-color:#f59e0b;color:#111827;font-weight:600}
+      .csm-btn-primary:hover{filter:brightness(.95)}
+      .csm-note{margin-top:8px;color:#94a3b8;font-size:12px}
+      /* Toasts (ct-*) */
+      .ct-wrap{position:fixed;top:12px;right:12px;display:flex;flex-direction:column;gap:8px;z-index:1000000}
+      .ct{min-width:260px;max-width:380px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.4);padding:10px 12px;display:flex;align-items:flex-start;gap:10px;opacity:0;transform:translateY(-6px);animation:ct-in .18s ease-out forwards}
+      .ct.ok{border-color:#16a34a}
+      .ct.warn{border-color:#f59e0b}
+      .ct.err{border-color:#dc2626}
+      .ct-close{margin-left:auto;background:transparent;border:0;color:#94a3b8;font-size:16px;cursor:pointer}
+      @keyframes ct-in{to{opacity:1;transform:translateY(0)}}
+      @keyframes ct-out{to{opacity:0;transform:translateY(-6px)}}
+    </style>
+  </head>
+  <body class="h-full text-slate-200 bg-animated-gold">
+    <div id="root" class="h-full"></div>
+
+    <!-- Hotfix visual: ocultar opción Exnova y forzar visualmente IQ Option -->
+    <style>
+      /* Oculta la opción Exnova en el desplegable de broker */
+      option[value="exnova"]{display:none!important}
+    </style>
+    <script>
+      (function(){
+        function applyVisualHotfix(){
+          try{
+            // Buscar el primer select que contenga las opciones de broker
+            const sel = document.querySelector('select');
+            if(!sel) return false;
+            const ex = sel.querySelector('option[value="exnova"]');
+            const iq = sel.querySelector('option[value="iqoption"]');
+            if(ex) ex.style.display = 'none';
+            if(iq && sel.value !== 'iqoption'){
+              sel.value = 'iqoption';
+              sel.dispatchEvent(new Event('input',{bubbles:true}));
+              sel.dispatchEvent(new Event('change',{bubbles:true}));
+            }
+            return true;
+          }catch(e){ return false; }
+        }
+        var tries = 0;
+        var id = setInterval(function(){
+          if(applyVisualHotfix() || ++tries > 40) clearInterval(id);
+        }, 200);
+      })();
+    </script>
+
+  </body>
+</html>
